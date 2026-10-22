@@ -1,0 +1,14 @@
+# This repo ships one self-contained tool and nothing else.
+# Banner zips and artwork are client material and must never be committed here.
+*.zip
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.svg
+*.mp4
+*.webm
+.DS_Store
+__MACOSX/
+.claude/
