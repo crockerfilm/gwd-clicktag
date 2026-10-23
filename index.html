@@ -310,7 +310,12 @@
     benignUrlHosts: ['www.w3.org', 'polymer.github.io'],
     junkFile: /(^|\/)(__MACOSX\/|\.DS_Store$|Thumbs\.db$|desktop\.ini$|\._[^/]*$)/i,
     studioFile: /(^|\/)(gwdgooglead_min\.js|gwdgooglead_style\.css|Enabler(_min)?\.js)$/i,
-    maxZipKB: 750,          // Max zip size from the media spec. 0 = just report weight.
+    // Weight, from the client's spec sheet: HTML + static backup under 200 KB,
+    // the static under 50 KB. Bytes, the way Finder counts them (1 KB = 1000).
+    maxZipBytes: 200000,    // a zip over this fails. 0 = just report weight.
+    roomyZipBytes: 150000,  // over this, the zip plus a 50 KB backup can pass 200 KB: noted
+    maxBackupBytes: 50000,  // the backup JPG beside the zip
+    maxAnimationSeconds: 30, // Google (DV360, Ad Manager) rejects ads that animate longer
     concurrency: 4,
     testTimeoutMs: 20000,
     mountTimeoutMs: 6000,
@@ -388,13 +393,15 @@
     { id: 'errors',   col: 'No errors',  label: 'No script errors',                what: 'No JavaScript errors while loading or clicking.' },
     { id: 'assets',   col: 'Files',      label: 'All referenced files included',   what: 'Every image, script and style the banner points to is inside the zip.' },
     { id: 'clean',    col: 'No junk',    label: 'No junk or unused files',         what: 'No __MACOSX or .DS_Store, and every file is used by the banner. CM360 rejects bundles with unused files.' },
-    { id: 'weight',   col: 'Weight',     label: 'File count and weight',           what: 'Number of files and zip size, for the spec sheet.' },
+    { id: 'weight',   col: 'Weight',     label: 'File count and weight',           what: 'Number of files and zip size. Over 200 KB fails; over 150 KB is noted, since the zip and its backup should stay under 200 KB together.' },
+    { id: 'length',   col: 'Stops',      label: 'Animation stops by 30 s',         what: 'Google (DV360, Ad Manager) can reject ads that animate longer than 30 seconds. A timeline that loops forever is noted.' },
+    { id: 'backup',   col: 'Backup',     label: 'Backup JPG beside the zip',       what: 'The static backup: a JPG of the end frame at the banner\'s size, under 50 KB, named like the zip. Drop it in with the zip; a PNG or a big JPG is converted.' },
   ];
 
   /* ===================== small utilities ===================== */
   const $ = (s, r = document) => r.querySelector(s);
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const fmtKB = n => (n / 1024 < 10 ? (n / 1024).toFixed(1) : Math.round(n / 1024)) + ' KB';
+  const fmtKB = n => (n / 1000 < 10 ? (n / 1000).toFixed(1) : Math.round(n / 1000)) + ' KB';   // as Finder shows it
   const TOOL_URL = location.href.replace(/[?#].*$/, '');
   const TEXT_EXT = /\.(html?|css|js|mjs|json|svg|txt|xml|map)$/i;
   const MIME = { html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json',
@@ -1187,7 +1194,13 @@
     return out;
   }
 
+  // Images dropped beside the banner zips (or beside them inside a zip of zips):
+  // the backups, matched to a banner by folder and name.
+  const looseImages = new Map();
+  const IMAGE = /\.(jpe?g|png|gif|webp)$/i;
   async function ingest(inputs) {
+    for (const x of inputs) if (IMAGE.test(x.file.name))
+      looseImages.set(backupKey(x.group, x.file.name), { name: x.file.name, data: new Uint8Array(await x.file.arrayBuffer()) });
     const zips = inputs.filter(x => /\.zip$/i.test(x.file.name));
     if (!zips.length) { alert('No .zip files found. Drop GWD banner zips (or a folder of them).'); return; }
     if (zips.length === 1 && !banners.length) containerName = zips[0].file.name.replace(/\.zip$/i, '');
@@ -1224,6 +1237,10 @@
     const hasHtml = real.some(e => /\.html?$/i.test(e.name));
     const inner = real.filter(e => /\.zip$/i.test(e.name));
     if (!hasHtml && inner.length && depth < 3) {
+      for (const e of real) if (IMAGE.test(e.name)) {
+        const sub = e.name.includes('/') ? e.name.slice(0, e.name.lastIndexOf('/')) : '';
+        looseImages.set(backupKey([group, sub].filter(Boolean).join('/'), baseName(e.name)), { name: baseName(e.name), data: new Uint8Array(await e.async('uint8array')) });
+      }
       for (const e of inner) {
         const sub = e.name.includes('/') ? e.name.slice(0, e.name.lastIndexOf('/')) : '';
         await expandZip(await e.async('arraybuffer'), baseName(e.name), [group, sub].filter(Boolean).join('/'), found, depth + 1);
@@ -1235,8 +1252,109 @@
     found.push({ name, group, files, junk: entries.length - real.length, srcSize: buf.byteLength });
   }
 
+  /* ===================== timing and backup ===================== */
+  // How long a GWD banner animates. GWD writes CSS animations ("12s linear 0s 1
+  // normal forwards name") and timeline events (an element with data-event-time
+  // and class event-N-animation) whose handler can jump back to a label: plain
+  // gotoAndPlay loops forever, gotoAndPlayNTimes repeats N times.
+  function animationTiming(html) {
+    const sec = t => t.endsWith('ms') ? parseFloat(t) / 1000 : parseFloat(t);
+    let T = 0, cssForever = false;
+    for (const m of html.matchAll(/animation\s*:\s*([^;"}<]+)/g)) {
+      for (const seg of m[1].split(/,(?![^(]*\))/)) {
+        const plain = seg.replace(/[\w-]+\([^)]*\)/g, ' ');
+        const times = plain.match(/-?[\d.]+m?s\b/g) || [];
+        if (!times.length) continue;
+        const dur = sec(times[0]), delay = times[1] ? Math.max(0, sec(times[1])) : 0;
+        const count = /\binfinite\b/.test(plain) ? Infinity : parseFloat((plain.match(/(?:^|\s)(\d+(?:\.\d+)?)(?=\s|$)/) || [])[1] || '1');
+        if (count === Infinity) cssForever = true;
+        T = Math.max(T, delay + dur * (isFinite(count) ? count : 1));
+      }
+    }
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const eventTime = new Map();
+    for (const el of doc.querySelectorAll('[data-event-time]')) {
+      const m = /(?:^|\s)(event-\d+)-animation(?:\s|$)/.exec(el.getAttribute('class') || '');
+      const name = el.getAttribute('data-event-name') || (m && m[1]);
+      if (name) eventTime.set(name, parseFloat(el.getAttribute('data-event-time')) / 1000);
+    }
+    const labels = new Map();
+    for (const el of doc.querySelectorAll('[data-gwd-animation-labels]'))
+      for (const part of (el.getAttribute('data-gwd-animation-labels') || '').split(';')) {
+        const [n, t] = part.split(',');
+        if (n && n.trim() && !isNaN(parseInt(t, 10))) labels.set(n.trim(), parseInt(t, 10) / 1000);
+      }
+    const bodyOf = name => {
+      const i = html.indexOf(`gwd.${name}=function(`);
+      if (i < 0) return '';
+      let j = html.indexOf('{', i), depth = 0, k = j;
+      for (; k < html.length; k++) { if (html[k] === '{') depth++; else if (html[k] === '}' && --depth === 0) break; }
+      return html.slice(j + 1, k);
+    };
+    // Timeline events only (event-N), not taps or clicks, which a viewer starts.
+    let loop = null;
+    for (const m of html.matchAll(/addHandler\(\s*"[^"]*"\s*,\s*"(event-\d+)"\s*,\s*gwd\.(\w+)/g)) {
+      const body = bodyOf(m[2]), at = eventTime.get(m[1]);
+      const n = /gotoAndPlayNTimes\(\s*"[^"]*"\s*,\s*"([^"]*)"\s*,\s*(\d+)/.exec(body);
+      const f = !n && /gotoAndPlay\(\s*"[^"]*"\s*,\s*"([^"]*)"/.exec(body);
+      if (!n && !f) continue;
+      const label = (n || f)[1], from = labels.has(label) ? labels.get(label) : 0;
+      const when = at !== undefined ? at : T;
+      loop = { event: m[1], at: when, label, from, times: n ? parseInt(n[2], 10) : Infinity };
+      if (!n) break;
+    }
+    const total = cssForever || (loop && loop.times === Infinity) ? Infinity
+      : loop ? loop.at + loop.times * Math.max(0, loop.at - loop.from) : T;
+    return { timeline: T, loop, cssForever, total };
+  }
+
+  // The backup image dropped in beside a zip: checked against the banner's size
+  // (a 2x export is scaled down) and re-encoded as a JPEG under the limit when
+  // it's a PNG, too big, or scaled. A JPEG already fine is kept as it is.
+  async function attachBackup(b) {
+    const src = b.backupSrc;
+    if (!src) return;
+    const W = b.dims.w, H = b.dims.h;
+    try {
+      const bmp = await createImageBitmap(new Blob([src.data]));
+      const w = bmp.width, h = bmp.height;
+      let tw = w, th = h;
+      const notes = [];
+      if (W && H && (w !== W || h !== H)) {
+        if (w > W && Math.abs(w / W - h / H) < 0.01) { tw = W; th = H; notes.push(`scaled from ${w}×${h}`); }
+        else { b.backup = { error: `It's ${w}×${h}, but the banner is ${W}×${H}.`, srcName: src.name }; return; }
+      }
+      const isJpeg = src.data[0] === 0xFF && src.data[1] === 0xD8;
+      if (isJpeg && tw === w && src.data.length <= SPEC.maxBackupBytes) {
+        b.backup = { data: src.data, w, h, srcName: src.name, notes };
+        return;
+      }
+      const c = document.createElement('canvas');
+      c.width = tw; c.height = th;
+      const x = c.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, tw, th);   // a JPEG has no transparency
+      x.drawImage(bmp, 0, 0, tw, th);
+      const enc = q => new Promise(r => c.toBlob(r, 'image/jpeg', q)).then(bl => bl.arrayBuffer()).then(a => new Uint8Array(a));
+      let best = null, lo = 0.1, hi = 0.95;
+      const top = await enc(hi);
+      if (top.length <= SPEC.maxBackupBytes) best = { q: hi, d: top };
+      else for (let k = 0; k < 8; k++) {
+        const q = (lo + hi) / 2, d = await enc(q);
+        if (d.length <= SPEC.maxBackupBytes) { best = { q, d }; lo = q; } else hi = q;
+      }
+      if (!best) { const d = await enc(0.1); if (d.length <= SPEC.maxBackupBytes) best = { q: 0.1, d }; }
+      if (!best) { b.backup = { error: `Even at the lowest JPEG quality it's over ${fmtKB(SPEC.maxBackupBytes)}.`, srcName: src.name }; return; }
+      notes.push(`${isJpeg ? 'recompressed' : 'converted'} from a ${fmtKB(src.data.length)} ${isJpeg ? 'JPEG' : 'image'}, JPEG quality ${Math.round(best.q * 100)}`);
+      b.backup = { data: best.d, w: tw, h: th, srcName: src.name, notes };
+    } catch (e) {
+      b.backup = { error: `It couldn't be read as an image (${e.message || e}).`, srcName: src.name };
+    }
+  }
+  const backupKey = (group, name) => ((group ? group + '/' : '') + name.replace(/\.[a-z0-9]+$/i, '')).toLowerCase();
+
   function makeBanner(f) {
     return { id: 'b' + banners.length, name: f.name, group: f.group || '', inFiles: f.files, junk: f.junk || 0, srcSize: f.srcSize || 0,
+      backupSrc: looseImages.get(backupKey(f.group || '', f.name)) || null,
       state: f.error ? 'error' : 'new', error: f.error || '', log: [], warns: [], rt: {}, checks: null, open: false, dims: {} };
   }
 
@@ -1283,6 +1401,8 @@
       for (const [p, f] of ordered) zip.file(p, f.data, { createFolders: false });
       b.zipData = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 9 } });
       b.static = staticChecks(b);
+      b.timing = animationTiming(r.html);
+      await attachBackup(b);
       b.payload = harnessPayload(b);
       b.state = 'converted';
     } catch (e) {
@@ -1477,11 +1597,39 @@
     else if (S.unused.length) C.clean = W(`Not used by the banner: ${S.unused.join(', ')}. CM360 rejects bundles with unused files.${junkNote}`, 'Remove it from the GWD project and re-export, or confirm it is loaded by custom code.');
     else C.clean = P(`No __MACOSX or .DS_Store, and every file is used by the banner.${junkNote}`);
 
-    // weight
+    // weight: the zip on its own, then with its backup beside it
     const z = b.zipData ? b.zipData.length : 0;
+    const bk = b.backup && b.backup.data ? b.backup.data.length : 0;
     const wd = `${S.fileCount} file${S.fileCount > 1 ? 's' : ''}, ${fmtKB(z)} zipped (${fmtKB(S.unzipped)} unzipped).`;
-    C.weight = SPEC.maxZipKB && z / 1024 > SPEC.maxZipKB ? F(`${wd} Over the ${SPEC.maxZipKB} KB limit.`, 'Compress images in GWD and re-export.')
-      : I(wd + (SPEC.maxZipKB ? ` Under the ${SPEC.maxZipKB} KB limit.` : ''));
+    const cap = fmtKB(SPEC.maxZipBytes);
+    if (SPEC.maxZipBytes && z > SPEC.maxZipBytes)
+      C.weight = F(`${wd} Over the spec sheet's ${cap}.`, 'Compress the images in GWD (or use smaller ones) and re-export.');
+    else if (SPEC.maxZipBytes && bk && z + bk > SPEC.maxZipBytes)
+      C.weight = W(`${wd} With its ${fmtKB(bk)} backup the pair is ${fmtKB(z + bk)}, over the spec sheet's ${cap} for HTML + static.`, `Compress the images in GWD so the zip is under ${fmtKB(SPEC.roomyZipBytes)}, or use a smaller backup.`);
+    else if (SPEC.roomyZipBytes && z > SPEC.roomyZipBytes)
+      C.weight = W(`${wd} Under ${cap}, but over ${fmtKB(SPEC.roomyZipBytes)}: a 50 KB backup beside it would take the pair over ${cap}.`, `Keep its backup under ${fmtKB(SPEC.maxZipBytes - z)}, or compress the images in GWD.`);
+    else C.weight = I(wd + (SPEC.maxZipBytes ? ` Under ${fmtKB(SPEC.roomyZipBytes || SPEC.maxZipBytes)}, leaving room for the backup.` : ''));
+
+    // how long it animates
+    const tm = b.timing;
+    const secs = t => `${+t.toFixed(1)}s`;
+    if (!tm || !tm.timeline) C.length = I('No animation found.');
+    else if (tm.cssForever) C.length = W('An animation repeats forever (CSS "infinite").', `Set a repeat count in GWD so everything stops by ${SPEC.maxAnimationSeconds}s.`);
+    else if (tm.loop && tm.loop.times === Infinity) {
+      const one = Math.max(0, tm.loop.at - tm.loop.from), twice = tm.loop.at + one;
+      C.length = W(`Loops forever: at ${secs(tm.loop.at)} the timeline goes back to "${tm.loop.label}" and plays again, the same as the AWS14 banners. Google's DV360 and Ad Manager can reject ads that animate longer than ${SPEC.maxAnimationSeconds}s.`,
+        `In GWD, select the timeline event at ${secs(tm.loop.at)} and change its action from "Go to and play" to "Go to and play N times": N = 1 plays it twice (${secs(twice)} in all), and it stops on the end frame.`);
+    } else if (tm.total > SPEC.maxAnimationSeconds + 1e-6)
+      C.length = W(`Animates for ${secs(tm.total)}${tm.loop ? ` (${tm.loop.times + 1} plays)` : ''}, longer than the ${SPEC.maxAnimationSeconds}s Google allows.`, 'Shorten the timeline or loop fewer times in GWD.');
+    else C.length = P(`Stops after ${secs(tm.total)}${tm.loop ? `: ${tm.loop.times + 1} plays of a ${secs(tm.loop.at)} timeline` : ''}.`);
+
+    // the backup image
+    const BK = b.backup;
+    const jpgName = b.name.replace(/\.zip$/i, '') + '.jpg';
+    if (!b.backupSrc) C.backup = W('No backup image was dropped in with this zip.', `Export the end frame as a JPG or PNG named ${jpgName} and drop it in together with the zip. It's checked, compressed under ${fmtKB(SPEC.maxBackupBytes)} if needed, and saved beside the converted zip.`);
+    else if (BK && BK.error) C.backup = W(`${BK.srcName}: ${BK.error} It was left out.`, `Export the end frame at ${b.dims.w || 'the banner'}×${b.dims.h || ''} px.`);
+    else if (BK && BK.data) C.backup = P(`${jpgName}, ${BK.w}×${BK.h}, ${fmtKB(BK.data.length)}${BK.notes.length ? ` (${BK.notes.join('; ')})` : ''}. Saved beside the zip.`);
+    else C.backup = WAIT;
 
     b.checks = C;
   }
@@ -1566,6 +1714,8 @@
     $('#vSub').textContent = run ? 'Converting, then loading each banner in a test frame. Results fill in as they finish.' :
       fail ? `${pass} passed. "Download all" includes only the passing banners. Failed ones can still be downloaded from their row.` :
       'Converted and verified. Eyeball rendering and animation in the QA preview before sending.';
+    const noBackup = run ? 0 : banners.filter(b => b.checks && b.checks.backup && b.checks.backup.s !== 'pass').length;
+    if (noBackup) $('#vSub').textContent += ` ${noBackup} banner${noBackup > 1 ? 's have' : ' has'} no usable backup image yet; see the Backup column.`;
     const ready = banners.filter(b => b.zipData && (bannerStatus(b) === 'pass' || bannerStatus(b) === 'warn'));
     $('#dlAll').disabled = run > 0 || !ready.length;
     $('#dlAll').textContent = fail && ready.length ? `Download ${ready.length} passing` : 'Download all';
@@ -1596,12 +1746,17 @@
     const st = bannerStatus(b);
     if (st === 'fail' && !confirm(`${b.name} failed ${failures(b).length} check(s). Download it anyway?`)) return;
     saveBlob(new Blob([b.zipData], { type: 'application/zip' }), b.name);
+    if (b.backup && b.backup.data) saveBlob(new Blob([b.backup.data], { type: 'image/jpeg' }), b.name.replace(/\.zip$/i, '') + '.jpg');
   }
   const stamp = () => new Date().toISOString().slice(0, 10);
   async function downloadAll() {
     const ready = banners.filter(b => b.zipData && (bannerStatus(b) === 'pass' || bannerStatus(b) === 'warn'));
     const zip = new JSZip();
-    for (const b of ready) zip.file((b.group ? b.group + '/' : '') + b.name, b.zipData, { binary: true });
+    for (const b of ready) {
+      zip.file((b.group ? b.group + '/' : '') + b.name, b.zipData, { binary: true });
+      // The backup sits beside its zip, same name, as the media team asked.
+      if (b.backup && b.backup.data) zip.file((b.group ? b.group + '/' : '') + b.name.replace(/\.zip$/i, '') + '.jpg', b.backup.data, { binary: true });
+    }
     const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
     saveBlob(blob, `${containerName || 'GWD_banners'}_clickTag_${stamp()}.zip`);
   }

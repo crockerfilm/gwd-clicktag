@@ -15,8 +15,9 @@ Everything runs in your browser. Banners are never uploaded anywhere.
 - Removes Enabler.js, the gwdgooglead component, StudioExports, `<gwd-exit>`, GWD ad metadata and the GWD self-identification metas.
 - Replaces Studio's `initAd()` start-up with a direct `goToPage`, so the banner doesn't render blank without Enabler.
 - Removes `__MACOSX` and `.DS_Store`.
+- Takes backup images dropped in beside the zips (same name, JPG or PNG), checks their size, compresses them under 50 KB and saves them beside the converted zip.
 
-Each banner is then loaded three times (no clickTag, a test `?clickTag=`, and a `javascript:` payload) and runs through 15 checks. The checks cover hardcoded URLs, remote dependencies, click behavior, ad-server overwrite, ad.size, component start-up, script errors, missing or unused files, and weight. Results are written for non-developers.
+Each banner is then loaded three times (no clickTag, a test `?clickTag=`, and a `javascript:` payload) and runs through 17 checks. The checks cover hardcoded URLs, remote dependencies, click behavior, ad-server overwrite, ad.size, component start-up, script errors, missing or unused files, weight (over 200 KB fails, over 150 KB is noted), whether the animation stops by 30 s, and the backup JPG. Results are written for non-developers.
 
 The **QA preview** tab, plus a downloadable QA page, show every converted banner with a test clickTag so someone can check rendering and animation by eye.
 
