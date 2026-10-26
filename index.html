@@ -143,6 +143,7 @@
   .pill.run { background: rgba(91,140,255,.15); color: var(--fix); }
   .pill.warn { background: rgba(245,166,35,.15); color: var(--warn); }
   .dl { background: none; border: 1px solid var(--line); color: var(--text); padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+  .dl + .dl { margin-left: 4px; }
 
   tr.detail > td { background: var(--panel-2); padding: 16px 18px 18px; cursor: default; }
   .dgrid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; }
@@ -1679,9 +1680,13 @@
       : st === 'warn' ? '<span class="pill warn">PASS · NOTE</span>'
       : `<span class="pill run">${b.state === 'new' ? 'QUEUED' : b.state === 'converted' || b.state === 'testing' ? 'TESTING' : 'CHECKING'}</span>`;
     tr.innerHTML = `<td class="name">${wrapName(b.name)}${b.group ? `<span class="grp">${esc(b.group)}</span>` : ''}</td><td class="num">${size}</td>${cells}<td>${pill}</td>` +
-      `<td>${b.zipData ? `<button class="dl" title="Download converted zip" data-dl="${b.id}">⤓</button>` : ''}</td>`;
+      `<td>${b.zipData ? `<button class="dl" title="Download converted zip" data-dl="${b.id}">⤓</button>` : ''}` +
+      `${b.zipData && b.backup && b.backup.data ? `<button class="dl" title="Download backup .jpg" data-jpg="${b.id}">JPG</button>` : ''}</td>`;
     const btn = tr.querySelector('[data-dl]');
     if (btn) btn.addEventListener('click', () => downloadOne(b));
+    // Its own button: a second download started by the same click is often blocked.
+    const jpg = tr.querySelector('[data-jpg]');
+    if (jpg) jpg.addEventListener('click', () => saveBlob(new Blob([b.backup.data], { type: 'image/jpeg' }), b.name.replace(/\.zip$/i, '') + '.jpg'));
     let det = document.getElementById(b.id + '-d');
     if (b.open) {
       if (!det) { det = document.createElement('tr'); det.id = b.id + '-d'; det.className = 'detail'; tr.after(det); }
@@ -1746,7 +1751,6 @@
     const st = bannerStatus(b);
     if (st === 'fail' && !confirm(`${b.name} failed ${failures(b).length} check(s). Download it anyway?`)) return;
     saveBlob(new Blob([b.zipData], { type: 'application/zip' }), b.name);
-    if (b.backup && b.backup.data) saveBlob(new Blob([b.backup.data], { type: 'image/jpeg' }), b.name.replace(/\.zip$/i, '') + '.jpg');
   }
   const stamp = () => new Date().toISOString().slice(0, 10);
   async function downloadAll() {
