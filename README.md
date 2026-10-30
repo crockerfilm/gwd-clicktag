@@ -1,7 +1,7 @@
 # GWD → IAB clickTag Converter (moved)
 
-**This tool now lives at https://crockerfilm.github.io/figma-html5/gwd.html**, part of the
-Copy Motion site (repo `crockerfilm/figma-html5`, file `gwd.html`). This repo's page
+**This tool now lives at https://hcrocker-sys.github.io/figma-toolkit/gwd.html**, part of the
+Figma Toolkit (repo `hcrocker-sys/figma-toolkit`, file `gwd.html`). This repo's page
 redirects there. The history below is kept for reference.
 
 
