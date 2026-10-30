@@ -1,4 +1,9 @@
-# GWD → IAB clickTag Converter
+# GWD → IAB clickTag Converter (moved)
+
+**This tool now lives at https://crockerfilm.github.io/figma-html5/gwd.html**, part of the
+Copy Motion site (repo `crockerfilm/figma-html5`, file `gwd.html`). This repo's page
+redirects there. The history below is kept for reference.
+
 
 Converts Google Web Designer (Studio / DV360) HTML5 banner zips to the standard IAB clickTag format, then checks every converted banner in a real browser frame.
 
